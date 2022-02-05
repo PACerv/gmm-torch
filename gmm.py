@@ -3,7 +3,7 @@ import numpy as np
 
 from math import pi
 from scipy.special import logsumexp
-from utils import calculate_matmul, calculate_matmul_n_times
+from gmm_torch.utils import calculate_matmul, calculate_matmul_n_times
 
 
 class GaussianMixture(torch.nn.Module):
@@ -15,7 +15,7 @@ class GaussianMixture(torch.nn.Module):
     probabilities are shaped (n, k, 1) if they relate to an individual sample,
     or (1, k, 1) if they assign membership probabilities to one of the mixture components.
     """
-    def __init__(self, n_components, n_features, covariance_type="full", eps=1.e-6, init_params="kmeans", mu_init=None, var_init=None):
+    def __init__(self, n_components, n_features, covariance_type="full", eps=1.e-6, init_params="kmeans", mu_init=None, var_init=None, requires_grad=False):
         """
         Initializes the model and brings all tensors into their required shape.
         The class expects data to be fed as a flat tensor in (n, d).
@@ -50,6 +50,7 @@ class GaussianMixture(torch.nn.Module):
         self.eps = eps
 
         self.log_likelihood = -np.inf
+        self.__requires_grad = requires_grad
 
         self.covariance_type = covariance_type
         self.init_params = init_params
@@ -59,34 +60,43 @@ class GaussianMixture(torch.nn.Module):
 
         self._init_params()
 
+    def copy(self, requires_grad=False):
+        return GaussianMixture(
+            self.n_components,
+            self.n_features,
+            covariance_type=self.covariance_type,
+            mu_init=self.mu,
+            var_init=self.var,
+            requires_grad=requires_grad
+        )
 
     def _init_params(self):
         if self.mu_init is not None:
             assert self.mu_init.size() == (1, self.n_components, self.n_features), "Input mu_init does not have required tensor dimensions (1, %i, %i)" % (self.n_components, self.n_features)
             # (1, k, d)
-            self.mu = torch.nn.Parameter(self.mu_init, requires_grad=False)
+            self.mu = torch.nn.Parameter(self.mu_init, requires_grad=self.__requires_grad)
         else:
-            self.mu = torch.nn.Parameter(torch.randn(1, self.n_components, self.n_features), requires_grad=False)
+            self.mu = torch.nn.Parameter(torch.randn(1, self.n_components, self.n_features), requires_grad=self.__requires_grad)
 
         if self.covariance_type == "diag":
             if self.var_init is not None:
                 # (1, k, d)
                 assert self.var_init.size() == (1, self.n_components, self.n_features), "Input var_init does not have required tensor dimensions (1, %i, %i)" % (self.n_components, self.n_features)
-                self.var = torch.nn.Parameter(self.var_init, requires_grad=False)
+                self.var = torch.nn.Parameter(self.var_init, requires_grad=self.__requires_grad)
             else:
-                self.var = torch.nn.Parameter(torch.ones(1, self.n_components, self.n_features), requires_grad=False)
+                self.var = torch.nn.Parameter(torch.ones(1, self.n_components, self.n_features), requires_grad=self.__requires_grad)
         elif self.covariance_type == "full":
             if self.var_init is not None:
                 # (1, k, d, d)
                 assert self.var_init.size() == (1, self.n_components, self.n_features, self.n_features), "Input var_init does not have required tensor dimensions (1, %i, %i, %i)" % (self.n_components, self.n_features, self.n_features)
-                self.var = torch.nn.Parameter(self.var_init, requires_grad=False,)
+                self.var = torch.nn.Parameter(self.var_init, requires_grad=self.__requires_grad)
             else:
                 self.var = torch.nn.Parameter(
                     torch.eye(self.n_features,dtype=torch.float64).reshape(1, 1, self.n_features, self.n_features).repeat(1, self.n_components, 1, 1),
-                    requires_grad=False)
+                    requires_grad=self.__requires_grad)
 
         # (1, k, 1)
-        self.pi = torch.nn.Parameter(torch.Tensor(1, self.n_components, 1), requires_grad=False).fill_(1. / self.n_components)
+        self.pi = torch.nn.Parameter(torch.ones(1, self.n_components, 1)/self.n_components, requires_grad=self.__requires_grad)
 
         self.params_fitted = False
 
@@ -191,8 +201,9 @@ class GaussianMixture(torch.nn.Module):
         weighted_log_prob = self._estimate_log_prob(x) + torch.log(self.pi)
 
         if probs:
-            p_k = torch.exp(weighted_log_prob)
-            return torch.squeeze(p_k / (p_k.sum(1, keepdim=True)))
+            return weighted_log_prob.softmax(1).squeeze(-1)
+            # p_k = torch.exp(torch.clamp(weighted_log_prob, max=50))
+            # return torch.squeeze(p_k / torch.clamp((p_k.sum(1, keepdim=True)), 1e-6))
         else:
             return torch.squeeze(torch.max(weighted_log_prob, 1)[1].type(torch.LongTensor))
 
